@@ -17,7 +17,6 @@ KC_LEN  = 20
 KC_MULT = 1.5
 MOM_LEN = 20
 
-# Minutos de cada hora en que se revisa (zona Argentina GMT-3)
 CHECK_MINUTES = {50, 59}
 TZ = pytz.timezone("America/Argentina/Buenos_Aires")
 
@@ -35,6 +34,14 @@ def get_candles():
     lows   = np.array([float(c[3]) for c in raw])
     closes = np.array([float(c[4]) for c in raw])
     return opens, highs, lows, closes
+
+def get_bingx_price():
+    url = "https://open-api.bingx.com/openApi/swap/v2/quote/price"
+    r = requests.get(url, params={"symbol": "DOGE-USDT"}, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    price = float(data["data"]["price"])
+    return price
 
 def ema(arr, n):
     result = np.zeros(len(arr))
@@ -55,7 +62,6 @@ def linreg_series(arr, n):
 
 def calc_momentum(opens, highs, lows, closes):
     N = len(closes)
-
     bb_basis = np.array([np.mean(closes[i-BB_LEN:i]) for i in range(BB_LEN, N+1)])
     bb_std   = np.array([np.std(closes[i-BB_LEN:i], ddof=0) for i in range(BB_LEN, N+1)])
     upper_bb = bb_basis + BB_MULT * bb_std
@@ -102,13 +108,7 @@ def check_signal(mom, op_al, cl_al):
     was_red      = prev < 0 and prev < prev2
     green_candle = float(cl_al[-1]) > float(op_al[-1])
     signal = was_red and is_orange and green_candle
-    info = {
-        "mom_cur":  round(float(cur),      8),
-        "mom_prev": round(float(prev),     8),
-        "close":    round(float(cl_al[-1]),6),
-        "green":    green_candle,
-    }
-    return signal, info
+    return signal, {"close": round(float(cl_al[-1]), 6)}
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -122,31 +122,25 @@ def send_telegram(text):
     return r.ok
 
 def seconds_until_next_check():
-    """Calcula los segundos hasta el próximo minuto de revisión (50 o 59)"""
     now = datetime.now(TZ)
     current_minute = now.minute
     current_second = now.second
-
-    # Buscar el próximo minuto de revisión
     future = sorted([m for m in CHECK_MINUTES if m > current_minute])
     if future:
         next_minute = future[0]
         wait = (next_minute - current_minute) * 60 - current_second
     else:
-        # Ya pasaron los dos minutos, esperar al próximo minuto 50 de la hora siguiente
         next_minute = min(CHECK_MINUTES)
         minutes_left = (60 - current_minute) + next_minute
         wait = minutes_left * 60 - current_second
-
     return max(wait, 1)
 
 def main():
-    print(f"[{datetime.now(TZ):%H:%M:%S}] Bot iniciado — revisando a los minutos {sorted(CHECK_MINUTES)} de cada hora (GMT-3)")
+    print(f"[{datetime.now(TZ):%H:%M:%S}] Bot iniciado")
     send_telegram(
         "🤖 <b>Squeeze Bot activo</b>\n"
-        "📊 Par: DOGE/USDT — Kraken\n"
-        "⏰ Timeframe: 1H\n"
-        "🎯 Señal: Momentum Rojo → Naranja + Vela Verde\n"
+        "📊 Análisis: DOGE/USDT — Kraken 1H\n"
+        "💰 Precio señal: BingX - 0.20%\n"
         f"🕐 Revisiones: minutos {sorted(CHECK_MINUTES)} de cada hora (GMT-3)"
     )
 
@@ -155,7 +149,7 @@ def main():
     while True:
         wait = seconds_until_next_check()
         now = datetime.now(TZ)
-        print(f"[{now:%H:%M:%S}] Próxima revisión en {wait}s (a las {now.strftime('%H')}:{str(sorted([m for m in CHECK_MINUTES if m > now.minute] or [min(CHECK_MINUTES)])[0]).zfill(2)})")
+        print(f"[{now:%H:%M:%S}] Próxima revisión en {wait}s")
         time.sleep(wait)
 
         try:
@@ -166,22 +160,16 @@ def main():
 
             if signal and last_signal_close != cl_al[-1]:
                 last_signal_close = cl_al[-1]
-                send_telegram(
-                    f"🟢 <b>SEÑAL DE COMPRA — DOGE/USDT</b>\n"
-                    f"⏰ Timeframe: 1H\n"
-                    f"📈 Squeeze Momentum: ROJO → NARANJA\n"
-                    f"🕯️ Vela verde confirmada\n"
-                    f"💰 Precio: <b>{info['close']}</b> USDT\n"
-                    f"📊 Momentum: {info['mom_cur']}"
-                )
-                print(f"[{now:%H:%M:%S}] SEÑAL enviada | precio: {info['close']}")
+                # Obtener precio BingX y aplicar -0.20%
+                bingx_price = get_bingx_price()
+                entry_price = round(bingx_price * (1 - 0.002), 6)
+                send_telegram(f"{entry_price}")
+                print(f"[{now:%H:%M:%S}] SEÑAL | BingX: {bingx_price} | Entrada: {entry_price}")
             else:
-                print(f"[{now:%H:%M:%S}] Sin señal | mom: {info.get('mom_cur','?')} | verde: {info.get('green','?')}")
+                print(f"[{now:%H:%M:%S}] Sin señal | mom: {mom[-1]:.8f} | verde: {float(cl_al[-1]) > float(op_al[-1])}")
 
         except Exception as e:
             print(f"[{datetime.now(TZ):%H:%M:%S}] Error: {e}")
 
 if __name__ == "__main__":
     main()
-
-
