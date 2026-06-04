@@ -210,8 +210,10 @@ def main():
                 one_third   = candle_size / 3
 
                 # Precio entrada
-                bingx_price = get_bingx_price()
-                entry_price = round(bingx_price - one_third, 6)
+                bingx_price  = get_bingx_price()
+                min_discount = bingx_price * 0.002        # 0.20%
+                discount     = max(one_third, min_discount)  # usar el mayor
+                entry_price  = round(bingx_price - discount, 6)
                 stop_loss   = round(entry_price - (atr_value * ATR_MULT), 6)
                 take_profit = round(entry_price + (atr_value * ATR_MULT), 6)
 
