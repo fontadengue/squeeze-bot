@@ -8,30 +8,21 @@ import pytz
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-# Kraken - análisis Squeeze
-KRAKEN_SYMBOL = "XDGUSD"
-INTERVAL      = 60
+SYMBOL   = "XDGUSD"
+INTERVAL = 60
 
-# BingX - precio y ATR
-BINGX_SYMBOL  = "DOGE-USDT"
-
-BB_LEN   = 20
-BB_MULT  = 2.0
-KC_LEN   = 20
-KC_MULT  = 1.5
-MOM_LEN  = 20
-ATR_LEN  = 13
-ATR_MULT = 1.5
+BB_LEN  = 20
+BB_MULT = 2.0
+KC_LEN  = 20
+KC_MULT = 1.5
+MOM_LEN = 20
 
 CHECK_MINUTES = {50, 59}
 TZ = pytz.timezone("America/Argentina/Buenos_Aires")
 
-# ─────────────────────────────────────────────────────────────
-# KRAKEN — velas 1H para Squeeze
-# ─────────────────────────────────────────────────────────────
-def get_kraken_candles():
+def get_candles():
     url = "https://api.kraken.com/0/public/OHLC"
-    r = requests.get(url, params={"pair": KRAKEN_SYMBOL, "interval": INTERVAL}, timeout=10)
+    r = requests.get(url, params={"pair": SYMBOL, "interval": INTERVAL}, timeout=10)
     r.raise_for_status()
     data = r.json()
     if data.get("error"):
@@ -44,35 +35,14 @@ def get_kraken_candles():
     closes = np.array([float(c[4]) for c in raw])
     return opens, highs, lows, closes
 
-# ─────────────────────────────────────────────────────────────
-# BINGX — precio actual y velas 1H para ATR
-# ─────────────────────────────────────────────────────────────
 def get_bingx_price():
     url = "https://open-api.bingx.com/openApi/swap/v2/quote/price"
-    r = requests.get(url, params={"symbol": BINGX_SYMBOL}, timeout=10)
+    r = requests.get(url, params={"symbol": "DOGE-USDT"}, timeout=10)
     r.raise_for_status()
     data = r.json()
-    return float(data["data"]["price"])
+    price = float(data["data"]["price"])
+    return price
 
-def get_bingx_candles():
-    url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
-    r = requests.get(url, params={
-        "symbol": BINGX_SYMBOL,
-        "interval": "1h",
-        "limit": 50
-    }, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    raw    = data["data"]
-    opens  = np.array([float(c["o"]) for c in raw])
-    highs  = np.array([float(c["h"]) for c in raw])
-    lows   = np.array([float(c["l"]) for c in raw])
-    closes = np.array([float(c["c"]) for c in raw])
-    return opens, highs, lows, closes
-
-# ─────────────────────────────────────────────────────────────
-# INDICADORES
-# ─────────────────────────────────────────────────────────────
 def ema(arr, n):
     result = np.zeros(len(arr))
     k = 2 / (n + 1)
@@ -80,16 +50,6 @@ def ema(arr, n):
     for i in range(1, len(arr)):
         result[i] = arr[i] * k + result[i-1] * (1 - k)
     return result
-
-def calc_atr(highs, lows, closes, n):
-    tr = np.zeros(len(closes))
-    tr[0] = highs[0] - lows[0]
-    for i in range(1, len(closes)):
-        tr[i] = max(highs[i] - lows[i],
-                    abs(highs[i] - closes[i-1]),
-                    abs(lows[i]  - closes[i-1]))
-    atr = ema(tr, n)
-    return atr[-1]
 
 def linreg_series(arr, n):
     results = []
@@ -140,14 +100,15 @@ def calc_momentum(opens, highs, lows, closes):
 
 def check_signal(mom, op_al, cl_al):
     if len(mom) < 3:
-        return False
+        return False, {}
     cur   = mom[-1]
     prev  = mom[-2]
     prev2 = mom[-3]
     is_orange    = cur  < 0 and cur  > prev
     was_red      = prev < 0 and prev < prev2
     green_candle = float(cl_al[-1]) > float(op_al[-1])
-    return was_red and is_orange and green_candle
+    signal = was_red and is_orange and green_candle
+    return signal, {"close": round(float(cl_al[-1]), 6)}
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -178,9 +139,8 @@ def main():
     print(f"[{datetime.now(TZ):%H:%M:%S}] Bot iniciado")
     send_telegram(
         "🤖 <b>Squeeze Bot activo</b>\n"
-        "📊 Squeeze: DOGE/USDT — Kraken 1H\n"
-        "📐 ATR 13: BingX 1H\n"
-        "💰 Precio entrada: BingX perpetuo\n"
+        "📊 Análisis: DOGE/USDT — Kraken 1H\n"
+        "💰 Precio señal: BingX - 0.20%\n"
         f"🕐 Revisiones: minutos {sorted(CHECK_MINUTES)} de cada hora (GMT-3)"
     )
 
@@ -194,36 +154,17 @@ def main():
 
         try:
             now = datetime.now(TZ)
-
-            # Squeeze con datos Kraken
-            k_opens, k_highs, k_lows, k_closes = get_kraken_candles()
-            mom, op_al, cl_al = calc_momentum(k_opens, k_highs, k_lows, k_closes)
-            signal = check_signal(mom, op_al, cl_al)
+            opens, highs, lows, closes = get_candles()
+            mom, op_al, cl_al = calc_momentum(opens, highs, lows, closes)
+            signal, info = check_signal(mom, op_al, cl_al)
 
             if signal and last_signal_close != cl_al[-1]:
                 last_signal_close = cl_al[-1]
-
-                # Vela actual de BingX para 1/3 y ATR
-                b_opens, b_highs, b_lows, b_closes = get_bingx_candles()
-                atr_value   = calc_atr(b_highs, b_lows, b_closes, ATR_LEN)
-                candle_size = abs(float(b_closes[-1]) - float(b_opens[-1]))
-                one_third   = candle_size / 3
-
-                # Precio entrada
-                bingx_price  = get_bingx_price()
-                min_discount = bingx_price * 0.002        # 0.20%
-                discount     = max(one_third, min_discount)  # usar el mayor
-                entry_price  = round(bingx_price - discount, 6)
-                stop_loss   = round(entry_price - (atr_value * ATR_MULT), 6)
-                take_profit = round(entry_price + (atr_value * ATR_MULT), 6)
-
-                msg = (
-                    f"Entrada: {entry_price}\n"
-                    f"SL: {stop_loss}\n"
-                    f"TP: {take_profit}"
-                )
-                send_telegram(msg)
-                print(f"[{now:%H:%M:%S}] SEÑAL | Entrada: {entry_price} | SL: {stop_loss} | TP: {take_profit} | ATR: {round(atr_value,6)}")
+                # Obtener precio BingX y aplicar -0.20%
+                bingx_price = get_bingx_price()
+                entry_price = round(bingx_price * (1 - 0.002), 6)
+                send_telegram(f"{entry_price}")
+                print(f"[{now:%H:%M:%S}] SEÑAL | BingX: {bingx_price} | Entrada: {entry_price}")
             else:
                 print(f"[{now:%H:%M:%S}] Sin señal | mom: {mom[-1]:.8f} | verde: {float(cl_al[-1]) > float(op_al[-1])}")
 
